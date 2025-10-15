@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "default": "chatapp-f3bc9",
+    "dev": "chatapp-f3bc9"
+  },
+  "targets": {},
+  "etags": {}
+}
