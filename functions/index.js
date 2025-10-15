@@ -1,87 +1,69 @@
-const admin = require('firebase-admin');
 const functions = require('firebase-functions');
 const express = require('express');
+const admin = require('firebase-admin');
 const cors = require('cors');
 
-// Initialize Firebase Admin SDK
 admin.initializeApp();
-console.log("admin.firestore.FieldValue:", admin.firestore.FieldValue);
 
 const app = express();
-app.use(cors({ origin: true }));
+
+// Enable CORS
+app.use(cors({ origin: true })); 
+
+// Parse JSON bodies
 app.use(express.json());
 
-// Middleware for token verification (authorization)
-app.use(async (req, res, next) => {
-    const authorizationHeader = req.headers.authorization;
-    let idToken;
+// Authentication middleware
+const authMiddleware = async (req, res, next) => {
+  if (!req.headers.authorization || !req.headers.authorization.startsWith('Bearer ')) {
+    return res.status(403).json({ error: 'Unauthorized: No token provided or malformed.' });
+  }
+  const idToken = req.headers.authorization.split('Bearer ')[1];
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    req.user = decodedToken;
+    next();
+  } catch (error) {
+    console.error("Error verifying ID Token:", error);
+    return res.status(403).json({ error: 'Unauthorized: Invalid token.' });
+  }
+};
 
-    if (authorizationHeader && authorizationHeader.startsWith('Bearer ')) {
-        idToken = authorizationHeader.split('Bearer ')[1];
+// POST /clients endpoint
+app.post('/clients', authMiddleware, async (req, res) => {
+    const userUid = req.user.uid;
+    const { name, phone, email } = req.body;
+
+    if (!name || !phone || !email) {
+      return res.status(400).json({ error: 'Missing client data: name, phone, and email are required.' });
     }
 
-    if (!idToken) {
-        return res.status(401).send('Unauthorized: No token provided');
-    }
-
-    if (idToken.startsWith('mock-token-')) {
-        const userUid = idToken.split('mock-token-')[1];
-        if (userUid) {
-            req.user = { uid: userUid, isEmulator: true };
-            console.log("Emulator detected: Mock token used for UID:", userUid);
-            return next();
-        } else {
-            return res.status(401).send('Unauthorized: Invalid mock token format');
-        }
-    } else {
-        try {
-            const decodedToken = await admin.auth().verifyIdToken(idToken);
-            req.user = decodedToken;
-            console.log("Production token verified for UID:", decodedToken.uid);
-            return next();
-        } catch (error) {
-            return res.status(401).send('Unauthorized: Invalid or expired ID token');
-        }
-    }
-});
-
-// Route for creating a new client
-app.post('/clients', async (req, res) => {
     try {
-        const { name, phone, email } = req.body;
-        const userId = req.user.uid;
+        const clientsRef = admin.firestore().collection('clients');
 
-        if (!name || !phone || !email) {
-            return res.status(400).send('Missing client data');
-        }
-
-        // Check for duplicate clients by email for the current user
-        const clientsRef = admin.firestore().collection('users').doc(userId).collection('clients');
-        const existingClientQuery = await clientsRef
+        // Check if client with the same email already exists
+        const existingClientSnapshot = await clientsRef
             .where('email', '==', email)
-            .limit(1)
             .get();
 
-        if (!existingClientQuery.empty) {
-            return res.status(409).send({ error: 'Client with this email already exists for this user.' });
+        if (!existingClientSnapshot.empty) {
+            return res.status(400).json({ error: 'Client with this email already exists.' });
         }
 
-        // Set creation timestamp, using serverTimestamp for production
-        const createdAt = req.user.isEmulator
-            ? new Date()
-            : admin.firestore.FieldValue.serverTimestamp();
-
-        await clientsRef.add({
+        // Add new client
+        const newClientRef = clientsRef.doc();
+        await newClientRef.set({
             name,
             phone,
             email,
-            createdAt
+            userId: userUid,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
-        return res.status(201).send({ message: 'Client added successfully!', userId });
+        return res.status(201).json({ id: newClientRef.id, message: 'Client added successfully' });
     } catch (error) {
-        console.error('Error in /clients endpoint:', error);
-        return res.status(500).send({ error: 'Failed to add client', details: error.message });
+        console.error("Error adding client:", error);
+        return res.status(500).json({ error: 'Failed to add client', details: error.message });
     }
 });
 
